@@ -12,9 +12,10 @@ REMOTE_PORT="80"
 
 # 安装依赖
 install_deps() {
-    if ! command -v socat &>/dev/null; then
-        echo "正在安装socat和依赖..."
-        apt-get update >/dev/null 2>&1 && apt-get install -y socat iptables httping || yum install -y socat iptables httping
+    if ! command -v socat &>/dev/null || ! command -v curl &>/dev/null; then
+        echo "正在安装必要依赖..."
+        apt-get update >/dev/null 2>&1 && apt-get install -y socat curl iptables ||
+        yum install -y socat curl iptables
     fi
 }
 
@@ -24,11 +25,20 @@ set_kernel() {
     sed -i 's/^#*net.ipv4.ip_forward=.*$/net.ipv4.ip_forward=1/' /etc/sysctl.conf
 }
 
-# 获取真实Host头（自动嗅探）
+# 获取真实Host头（修复版）
 detect_host_header() {
     echo "正在自动检测目标服务器域名..."
-    timeout 5 curl -sI "http://$REMOTE_IP:$REMOTE_PORT" | grep -i 'Location: \|Host: ' | awk -F'[: ]+' '/Host:/{print $2}'
-    [ $? -ne 0 ] && echo "检测失败，请手动输入域名：" && read manual_host && echo "$manual_host"
+    detected_host=$(timeout 5 curl -sI "http://$REMOTE_IP" | awk -F': ' '/^[Hh]ost:/{print $2}' | tr -d '\r')
+    
+    if [ -z "$detected_host" ]; then
+        echo "⚠️ 自动检测失败，请手动输入目标服务器域名（例如：example.com）："
+        read -r detected_host
+        while [[ -z "$detected_host" ]]; do
+            echo "域名不能为空，请重新输入："
+            read -r detected_host
+        done
+    fi
+    echo "$detected_host"
 }
 
 # 设置透明代理
@@ -48,10 +58,10 @@ setup_proxy() {
     iptables -t nat -A POSTROUTING -p tcp -d $REMOTE_IP --dport $REMOTE_PORT -o $wan_iface -j MASQUERADE
 
     # 启动socat进行Host头注入
-    nohup socat TCP4-LISTEN:$local_port,fork,reuseaddr PROXY:$REMOTE_IP:$REMOTE_PORT,proxyport=$local_port,proxyauth=user:pass,header-add="Host: $host_header" >/dev/null 2>&1 &
+    nohup socat TCP4-LISTEN:$local_port,fork,reuseaddr PROXY:$REMOTE_IP:$REMOTE_PORT,proxyport=$local_port,header-add="Host: $host_header" >/dev/null 2>&1 &
 }
 
-# 验证设置
+# 验证设置（使用curl替代httping）
 verify_proxy() {
     local_port=$1
     host_header=$2
@@ -59,13 +69,20 @@ verify_proxy() {
     echo -e "\n🔍 运行验证测试..."
     
     # 基础端口测试
-    nc -zv 127.0.0.1 $local_port 2>&1 | grep "succeeded" && echo "✅ 端口转发正常" || echo "❌ 端口转发失败"
+    if nc -zv 127.0.0.1 $local_port 2>&1 | grep -q "succeeded"; then
+        echo "✅ 端口转发正常"
+    else
+        echo "❌ 端口转发失败（请检查端口冲突）"
+        return 1
+    fi
 
     # HTTP协议测试
-    httping -c 3 -t 5 http://127.0.0.1:$local_port -H "Host: $host_header" | grep "connected" && echo "✅ HTTP连接正常" || echo "❌ HTTP连接失败"
-
-    # Host头验证
-    curl -s -H "Host: invalid.host" http://127.0.0.1:$local_port -I | grep "HTTP/1.1 200 OK" >/dev/null && echo "✅ Host头强制生效" || echo "❌ Host头未生效"
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" -H "Host: $host_header" http://127.0.0.1:$local_port)
+    if [ "$http_code" = "200" ]; then
+        echo "✅ HTTP连接正常（状态码200）"
+    else
+        echo "❌ HTTP连接异常（状态码$http_code）"
+    fi
 }
 
 set_proxy() {
@@ -75,9 +92,14 @@ set_proxy() {
     read -p "请输入本地端口（默认8686）: " port
     local_port=${port:-8686}
 
-    # 自动获取Host头
+    # 验证端口是否被占用
+    if ss -tuln | grep -q ":$local_port "; then
+        echo "❌ 端口 $local_port 已被占用，请更换端口！"
+        exit 1
+    fi
+
+    # 获取Host头
     detected_host=$(detect_host_header)
-    [ -z "$detected_host" ] && read -p "请输入目标服务器域名: " detected_host
 
     # 设置代理
     setup_proxy $local_port "$detected_host"
