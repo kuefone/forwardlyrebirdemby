@@ -48,8 +48,8 @@ server {
     server_name _;
     
     location / {
-        proxy_pass https://direct.lyrebirdemby.com;
-        proxy_set_header Host direct.lyrebirdemby.com;
+        proxy_pass https://cdn.lyrebirdemby.com;
+        proxy_set_header Host cdn.lyrebirdemby.com;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
