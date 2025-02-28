@@ -45,13 +45,20 @@ setup_proxy() {
     cat > /etc/nginx/conf.d/flybird.conf << EOF
 server {
     listen $port;
+    server_name _;
+    
     location / {
         proxy_pass http://188.172.228.65:80;
-        proxy_set_header Host \$host;
+        proxy_set_header Host \$http_host;
         proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
     }
 }
 EOF
+
+    # 检查nginx配置是否正确
+    nginx -t
 
     # 重启nginx
     systemctl restart nginx
