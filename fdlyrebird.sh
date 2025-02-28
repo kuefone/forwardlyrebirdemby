@@ -48,7 +48,7 @@ server {
     server_name _;
     
     location / {
-        proxy_pass http://188.172.228.65:80;
+        proxy_pass http://direct.lyrebirdemby.com;
         proxy_set_header Host \$http_host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
