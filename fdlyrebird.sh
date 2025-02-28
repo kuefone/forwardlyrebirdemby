@@ -9,7 +9,7 @@ fi
 SCRIPT_PATH=$(realpath "$0")
 NGINX_CONF_DIR="/etc/nginx/conf.d"
 PROXY_CONF="$NGINX_CONF_DIR/reverse-proxy.conf"
-REMOTE_SERVER="188.172.228.65:80"
+REMOTE_SERVER="http://188.172.228.65"
 
 # 安装Nginx
 install_nginx() {
