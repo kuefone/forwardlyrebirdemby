@@ -21,24 +21,37 @@ RESET='\033[0m'
 # 安装依赖
 install_deps() {
     echo -e "${BLUE}正在检查系统环境...${RESET}"
+    
+    # 禁用man-db触发器
+    if ! grep -q "man-db" /etc/apt/apt.conf.d/00aptsettings; then
+        echo 'DPkg::options { "--skip-man-db"; }' > /etc/apt/apt.conf.d/00aptsettings
+    fi
+
+    # 优化APT安装参数
+    export DEBIAN_FRONTEND=noninteractive
+    export APT_KEY_DONT_WARN_ON_DANGEROUS_USAGE=1
+    
     if ! command -v curl &>/dev/null; then
         echo -e "${YELLOW}正在安装curl...${RESET}"
-        apt install -y curl || yum install -y curl
+        apt-get -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" install -y curl
     fi
     
     if ! command -v nginx &>/dev/null; then
         echo -e "${YELLOW}正在安装Nginx...${RESET}"
-        if command -v apt &>/dev/null; then
-            apt update && apt install -y nginx
-        elif command -v yum &>/dev/null; then
-            yum install -y epel-release
-            yum install -y nginx
-        else
-            echo -e "${RED}不支持的Linux发行版${RESET}"
-            exit 1
-        fi
-        systemctl enable nginx --now
+        # 分步安装避免服务卡住
+        apt-get update
+        apt-get download nginx
+        dpkg --unpack ./nginx*.deb
+        systemctl daemon-reload
+        apt-get -f install -y
+        
+        # 延迟服务启用
+        systemctl disable nginx --now 2>/dev/null
+        rm -f /etc/nginx/sites-enabled/*
     fi
+
+    # 清理APT优化设置
+    rm -f /etc/apt/apt.conf.d/00aptsettings
 }
 
 # 检测目标Host头
