@@ -14,7 +14,7 @@ REMOTE_PORT="80"
 get_local_ip() {
     # 尝试获取公网IP
     if command -v curl &>/dev/null; then
-        public_ip=$(curl -4 -s --connect-timeout 5 https://ip.sb 2>/dev/null)
+        public_ip=$(curl -4 -s --connect-timeout 5 ip.sb 2>/dev/null)
         [[ $public_ip =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && echo "$public_ip" && return
     fi
 
