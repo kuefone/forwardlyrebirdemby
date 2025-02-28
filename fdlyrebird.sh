@@ -7,151 +7,146 @@ if [ "$(id -u)" != "0" ]; then
 fi
 
 SCRIPT_PATH=$(realpath "$0")
-REMOTE_IP="188.172.228.65"
-REMOTE_PORT="80"
+NGINX_CONF_DIR="/etc/nginx/conf.d"
+PROXY_CONF="$NGINX_CONF_DIR/reverse-proxy.conf"
+REMOTE_SERVER="188.172.228.65:80"
 
-# 安装依赖
-install_deps() {
-    if ! command -v socat &>/dev/null || ! command -v curl &>/dev/null; then
-        echo "正在安装必要依赖..."
-        apt-get update >/dev/null 2>&1 && apt-get install -y socat curl iptables ||
-        yum install -y socat curl iptables
+# 安装Nginx
+install_nginx() {
+    if ! command -v nginx &>/dev/null; then
+        echo "正在安装Nginx..."
+        if command -v apt &>/dev/null; then
+            apt update && apt install -y nginx
+        elif command -v yum &>/dev/null; then
+            yum install -y epel-release
+            yum install -y nginx
+        else
+            echo "不支持的包管理器，请手动安装Nginx"
+            exit 1
+        fi
+        systemctl enable nginx
     fi
 }
 
-# 设置内核参数
-set_kernel() {
-    sysctl -w net.ipv4.ip_forward=1
-    sed -i 's/^#*net.ipv4.ip_forward=.*$/net.ipv4.ip_forward=1/' /etc/sysctl.conf
+# 创建代理配置
+create_proxy_config() {
+    local local_port=$1
+    cat > "$PROXY_CONF" <<EOF
+server {
+    listen $local_port;
+    server_name _;
+
+    location / {
+        proxy_pass http://$REMOTE_SERVER;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        
+        # 重要超时设置
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 600s;
+        proxy_read_timeout 600s;
+        send_timeout 600s;
+    }
+
+    access_log /var/log/nginx/reverse-proxy.access.log;
+    error_log /var/log/nginx/reverse-proxy.error.log;
+}
+EOF
 }
 
-# 获取真实Host头（修复版）
-detect_host_header() {
-    echo "正在自动检测目标服务器域名..."
-    detected_host=$(timeout 5 curl -sI "http://$REMOTE_IP" | awk -F': ' '/^[Hh]ost:/{print $2}' | tr -d '\r')
-    
-    if [ -z "$detected_host" ]; then
-        echo "⚠️ 自动检测失败，请手动输入目标服务器域名（例如：example.com）："
-        read -r detected_host
-        while [[ -z "$detected_host" ]]; do
-            echo "域名不能为空，请重新输入："
-            read -r detected_host
-        done
-    fi
-    echo "$detected_host"
-}
-
-# 设置透明代理
-setup_proxy() {
-    local_port=$1
-    host_header=$2
-
-    # 清空旧规则
-    iptables -t nat -F
-
-    # TCP透明转发规则
-    iptables -t nat -A PREROUTING -p tcp --dport $local_port -j DNAT --to-destination $REMOTE_IP:$REMOTE_PORT
-    iptables -t nat -A OUTPUT -p tcp -d 127.0.0.1 --dport $local_port -j DNAT --to-destination $REMOTE_IP:$REMOTE_PORT
-    
-    # MASQUERADE规则
-    wan_iface=$(ip route | awk '/default/{print $5}')
-    iptables -t nat -A POSTROUTING -p tcp -d $REMOTE_IP --dport $REMOTE_PORT -o $wan_iface -j MASQUERADE
-
-    # 启动socat进行Host头注入
-    nohup socat TCP4-LISTEN:$local_port,fork,reuseaddr PROXY:$REMOTE_IP:$REMOTE_PORT,proxyport=$local_port,header-add="Host: $host_header" >/dev/null 2>&1 &
-}
-
-# 验证设置（使用curl替代httping）
-verify_proxy() {
-    local_port=$1
-    host_header=$2
-
-    echo -e "\n🔍 运行验证测试..."
-    
-    # 基础端口测试
-    if nc -zv 127.0.0.1 $local_port 2>&1 | grep -q "succeeded"; then
-        echo "✅ 端口转发正常"
-    else
-        echo "❌ 端口转发失败（请检查端口冲突）"
-        return 1
-    fi
-
-    # HTTP协议测试
-    http_code=$(curl -s -o /dev/null -w "%{http_code}" -H "Host: $host_header" http://127.0.0.1:$local_port)
-    if [ "$http_code" = "200" ]; then
-        echo "✅ HTTP连接正常（状态码200）"
-    else
-        echo "❌ HTTP连接异常（状态码$http_code）"
+# 设置防火墙
+configure_firewall() {
+    local port=$1
+    if command -v ufw &>/dev/null; then
+        ufw allow "$port/tcp"
+        ufw reload
+    elif command -v firewall-cmd &>/dev/null; then
+        firewall-cmd --permanent --add-port="$port/tcp"
+        firewall-cmd --reload
     fi
 }
 
-set_proxy() {
-    install_deps
-    set_kernel
-
-    read -p "请输入本地端口（默认8686）: " port
+# 启用代理
+enable_proxy() {
+    read -p "请输入本地监听端口（默认8686）: " port
     local_port=${port:-8686}
 
-    # 验证端口是否被占用
+    # 检查端口占用
     if ss -tuln | grep -q ":$local_port "; then
-        echo "❌ 端口 $local_port 已被占用，请更换端口！"
+        echo "错误：端口 $local_port 已被占用！"
         exit 1
     fi
 
-    # 获取Host头
-    detected_host=$(detect_host_header)
+    install_nginx
+    create_proxy_config "$local_port"
+    configure_firewall "$local_port"
 
-    # 设置代理
-    setup_proxy $local_port "$detected_host"
-
-    # 防火墙处理
-    ufw allow $local_port/tcp >/dev/null 2>&1 || firewall-cmd --add-port=$local_port/tcp --permanent >/dev/null 2>&1
-
-    # 显示配置信息
-    echo -e "\n✅ 代理设置成功！"
-    echo "=============================="
-    echo "监听端口: $local_port"
-    echo "强制Host头: $detected_host"
-    echo "测试命令:"
-    echo "curl -H 'Host: $detected_host' http://127.0.0.1:$local_port"
-    echo "=============================="
-
-    # 运行验证
-    verify_proxy $local_port "$detected_host"
+    # 重载Nginx配置
+    if nginx -t && systemctl reload nginx; then
+        echo -e "\n✅ 反向代理设置成功！"
+        echo "================================"
+        echo "本地访问: 127.0.0.1:$local_port"
+        echo "网络访问: $(curl -4 -s https://ip.sb || hostname -I | awk '{print $1}'):$local_port"
+        echo "测试命令: curl -v http://127.0.0.1:$local_port"
+        echo "================================"
+    else
+        echo "❌ Nginx配置错误，请检查日志！"
+        exit 1
+    fi
 }
 
-# 清理规则
-clean_proxy() {
-    iptables -t nat -F
-    pkill -9 socat
-    echo "✅ 所有代理规则已清除"
+# 禁用代理
+disable_proxy() {
+    rm -f "$PROXY_CONF"
+    systemctl reload nginx
+    echo "✅ 已移除反向代理配置"
 }
 
-# 卸载脚本
-uninstall() {
-    clean_proxy
+# 完全卸载
+full_uninstall() {
+    disable_proxy
     rm -f "$SCRIPT_PATH"
-    echo "✅ 脚本已彻底移除"
+    echo "✅ 脚本已彻底卸载"
+    read -p "是否要卸载Nginx？[y/N] " choice
+    if [[ $choice =~ ^[Yy]$ ]]; then
+        if command -v apt &>/dev/null; then
+            apt remove --purge -y nginx
+        elif command -v yum &>/dev/null; then
+            yum remove -y nginx
+        fi
+        echo "✅ Nginx已卸载"
+    fi
 }
 
-# 主菜单
-main_menu() {
-    while true; do
-        echo -e "\n===== 智能反代管理 ====="
-        echo "1) 设置反代"
-        echo "2) 清除反代"
-        echo "3) 完全卸载"
-        echo "4) 退出脚本"
-        read -p "请输入选择: " choice
+# 显示菜单
+show_menu() {
+    echo -e "\n===== Nginx反向代理管理 ====="
+    echo "1) 启用反向代理"
+    echo "2) 禁用反向代理"
+    echo "3) 查看代理状态"
+    echo "4) 完全卸载"
+    echo "5) 退出脚本"
+    read -p "请输入选项: " choice
 
-        case $choice in
-            1) set_proxy ;;
-            2) clean_proxy ;;
-            3) uninstall ;;
-            4) exit 0 ;;
-            *) echo "无效输入";;
-        esac
-    done
+    case $choice in
+        1) enable_proxy ;;
+        2) disable_proxy ;;
+        3) 
+            echo -e "\n当前代理配置："
+            [ -f "$PROXY_CONF" ] && cat "$PROXY_CONF" || echo "未找到代理配置"
+            echo -e "\nNginx状态："
+            systemctl status nginx --no-pager
+            ;;
+        4) full_uninstall ;;
+        5) exit 0 ;;
+        *) echo "无效输入";;
+    esac
 }
 
-main_menu
+# 主循环
+while true; do
+    show_menu
+    read -p "按回车键继续..."
+done
